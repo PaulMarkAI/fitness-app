@@ -263,13 +263,141 @@ async function updateFile(path, mutate, message) {
   throw new ApiError('conflict', 'Die Datei wurde gleichzeitig woanders geändert. Bitte nochmal speichern.');
 }
 
+async function listDir(path) {
+  const r = await request(fileUrl(path), { headers: headers() });
+  if (r.status === 404) return [];
+  if (r.status === 403) throw new ApiError('auth', 'Der Schlüssel hat keinen Zugriff auf das Repository.');
+  if (!r.ok) throw new ApiError('http', `Laden fehlgeschlagen (${r.status}).`);
+  const j = await r.json();
+  return Array.isArray(j) ? j.filter((f) => f.type === 'file').map((f) => f.name) : [];
+}
+
 async function loadAll() {
-  const [g, m, l, p] = await Promise.all([FILES.gewicht, FILES.masse, FILES.log, FILES.plan].map(getFile));
+  const [g, m, l, p, dir] = await Promise.all([
+    getFile(FILES.gewicht), getFile(FILES.masse), getFile(FILES.log), getFile(FILES.plan), listDir('essen'),
+  ]);
   if (!p.text) throw new ApiError('data', '„trainingsplan.json“ fehlt im Daten-Repository.');
   let plan;
   try { plan = JSON.parse(p.text); } catch (e) { throw new ApiError('data', '„trainingsplan.json“ ist fehlerhaft.'); }
   const log = parseLog(l.text);
-  S = { plan, weights: parseWeights(g.text), masse: parseMasse(m.text), sessions: log.sessions, sets: log.sets };
+  const weeks = dir.filter((n) => WEEK_FILE_RE.test(n)).sort();
+  const keep = S.essen && weeks.includes(S.essen.name) ? S.essen.name : defaultWeek(weeks);
+  const essen = { weeks, ...(await loadWeek(keep)) };
+  S = { plan, weights: parseWeights(g.text), masse: parseMasse(m.text), sessions: log.sessions, sets: log.sets, essen };
+}
+
+/* ---------- Essen: Wochenrezepte und Einkaufsliste ---------- */
+const WEEK_FILE_RE = /^(\d{4})-KW(\d{1,2})\.json$/;
+const ABTEILUNGEN = ['Obst & Gemüse', 'Brot & Backwaren', 'Kühlregal', 'Fleisch', 'Tiefkühl', 'Konserven & Trockenware', 'Vorrat'];
+
+function kwMonday(year, week) {
+  const jan4 = new Date(year, 0, 4);
+  const d = new Date(year, 0, 4 - ((jan4.getDay() + 6) % 7) + (week - 1) * 7);
+  return isoDate(d);
+}
+function weekFileMonday(name) { const m = name.match(WEEK_FILE_RE); return m ? kwMonday(+m[1], +m[2]) : null; }
+function selPath(name) { return `essen/${name.replace('.json', '-auswahl.json')}`; }
+function emptySel() { return { auswahl: {}, gestrichen: [] }; }
+
+// Standard: die Woche, in der heute liegt; sonst die nächste kommende; sonst die letzte vorhandene
+function defaultWeek(names) {
+  const t = today();
+  const list = names.map((n) => ({ n, mon: weekFileMonday(n) })).sort((a, b) => (a.mon < b.mon ? -1 : 1));
+  const cur = list.find((w) => w.mon <= t && t <= addDays(w.mon, 6));
+  if (cur) return cur.n;
+  const next = list.find((w) => w.mon > t);
+  return next ? next.n : (list.length ? list[list.length - 1].n : null);
+}
+
+async function loadWeek(name) {
+  if (!name) return { name: null, data: null, sel: emptySel() };
+  const [w, a] = await Promise.all([getFile(`essen/${name}`), getFile(selPath(name))]);
+  let data;
+  try { data = JSON.parse(w.text); } catch (e) { throw new ApiError('data', `„essen/${name}“ ist fehlerhaft.`); }
+  let sel = emptySel();
+  if (a.text) { try { sel = { ...emptySel(), ...JSON.parse(a.text) }; } catch (e) { /* defekte Auswahl: neu anfangen */ } }
+  return { name, data, sel };
+}
+
+function fmtAmount(n) { return n.toLocaleString('de-DE', { maximumFractionDigits: 2 }); }
+const PLURAL = { Dose: 'Dosen', Packung: 'Packungen', Zehe: 'Zehen' };
+function unitFor(einheit, n) { return n !== 1 && PLURAL[einheit] ? PLURAL[einheit] : (einheit || ''); }
+function fmtEuro(n) { return n.toFixed(2).replace('.', ',') + ' €'; }
+
+function shoppingList(E) {
+  const d = E.data;
+  const items = new Map();
+  const add = (z) => {
+    const e = items.get(z.name) || { name: z.name, mengen: {} };
+    const u = z.einheit || '';
+    e.mengen[u] = z.menge == null ? (e.mengen[u] ?? null) : (e.mengen[u] || 0) + z.menge;
+    items.set(z.name, e);
+  };
+  const missing = [];
+  d.bloecke.forEach((b) => {
+    const g = b.gerichte.find((x) => x.id === E.sel.auswahl[b.id]);
+    if (g) g.zutaten.forEach(add); else missing.push(b.name);
+  });
+  (d.snacks || []).forEach((s) => s.zutaten.forEach(add));
+
+  const groups = new Map(ABTEILUNGEN.map((a) => [a, []]));
+  let total = 0;
+  for (const e of items.values()) {
+    const art = d.artikel[e.name] || {};
+    const abt = art.vorrat ? 'Vorrat' : (art.abteilung || 'Sonstiges');
+    const menge = art.einheit != null ? e.mengen[art.einheit] : null;
+    let packs = null, preis = null;
+    if (!art.vorrat && menge != null && art.packung && art.preis != null) {
+      packs = Math.ceil(menge / art.packung - 1e-9);
+      preis = packs * art.preis;
+    }
+    const struck = E.sel.gestrichen.includes(e.name);
+    if (preis != null && !struck) total += preis;
+    if (!groups.has(abt)) groups.set(abt, []);
+    groups.get(abt).push({ name: e.name, mengen: e.mengen, art, packs, preis, struck });
+  }
+  groups.forEach((list) => list.sort((a, b) => a.name.localeCompare(b.name, 'de')));
+  return { groups, total, missing };
+}
+
+function mengenText(mengen) {
+  const parts = Object.entries(mengen).filter(([, m]) => m != null).map(([u, m]) => `${fmtAmount(m)}${u ? ' ' + unitFor(u, m) : ''}`);
+  return parts.length ? parts.join(' + ') : 'nach Bedarf';
+}
+
+// Auswahl und Durchgestrichenes werden kurz gesammelt und dann gespeichert (nicht bei jedem Tippen)
+let pendingSel = null;
+let selTimer = null;
+function queueSelSave() {
+  pendingSel = { name: S.essen.name, sel: S.essen.sel };
+  clearTimeout(selTimer);
+  selTimer = setTimeout(flushSel, 800);
+}
+async function flushSel() {
+  clearTimeout(selTimer);
+  if (!pendingSel) return;
+  const { name, sel } = pendingSel;
+  pendingSel = null;
+  try {
+    await updateFile(selPath(name), () => JSON.stringify(sel, null, 2) + '\n', `Essen ${name.replace('.json', '')}: Auswahl`);
+  } catch (e) {
+    if (e.kind === 'auth') return logout(e.message);
+    toast('Auswahl nicht gespeichert: ' + e.message, true);
+  }
+}
+
+async function switchEssenWeek(step) {
+  const E = S.essen;
+  const i = E.weeks.indexOf(E.name) + step;
+  if (i < 0 || i >= E.weeks.length) return;
+  await flushSel();
+  try {
+    S.essen = { weeks: E.weeks, ...(await loadWeek(E.weeks[i])) };
+    render();
+  } catch (e) {
+    if (e.kind === 'auth') return logout(e.message);
+    toast(e.message, true);
+  }
 }
 
 /* ---------- Training: Logik ---------- */
@@ -312,13 +440,14 @@ function readyToProgress(row, ex) {
 const ICONS = {
   start: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M3 12l9-8 9 8"/><path d="M5 10v10h14V10"/></svg>',
   training: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M6 7v10M18 7v10M3 9v6M21 9v6M6 12h12"/></svg>',
+  essen: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M7 3v18M4 3v5a3 3 0 0 0 6 0V3M17 21V3c-2.5 1.5-4 4-4 7v3h4"/></svg>',
   masse: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="2" y="8" width="20" height="8" rx="2"/><path d="M6 8v3M10 8v4M14 8v3M18 8v4"/></svg>',
   plan: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M9 6h11M9 12h11M9 18h11M4 6h.01M4 12h.01M4 18h.01"/></svg>',
 };
-const TABS = [['start', 'Übersicht'], ['training', 'Training'], ['masse', 'Maße'], ['plan', 'Plan']];
+const TABS = [['start', 'Übersicht'], ['training', 'Training'], ['essen', 'Essen'], ['masse', 'Maße'], ['plan', 'Plan']];
 
 function render(opts = {}) {
-  const views = { start: viewStart, training: viewTraining, masse: viewMasse, plan: viewPlan };
+  const views = { start: viewStart, training: viewTraining, essen: viewEssen, masse: viewMasse, plan: viewPlan };
   const scroll = window.scrollY;
   const title = TABS.find((t) => t[0] === ui.tab)[1];
   $('#app').innerHTML = `
@@ -411,37 +540,37 @@ function weekCard() {
     ${info}`;
 }
 
-function viewStart() {
+// Gewicht eintragen: nur ein Knopf, das Formular klappt erst beim Antippen auf
+function weightAdd() {
   const ws = S.weights;
   const t = today();
   const todayEntry = ws.find((w) => w.date === t);
-  const m = S.masse[S.masse.length - 1];
+  if (!ui.wAdd) {
+    return `<button class="full ${todayEntry ? '' : 'primary'}" data-action="wadd">+ Gewicht${todayEntry ? '' : ' für heute'} eintragen</button>`;
+  }
+  return `<div class="add-form">
+    ${todayEntry ? `<p class="label">Heute schon eingetragen: ${fmt(todayEntry.kg, 1)} kg. Ein neuer Wert überschreibt ihn.</p>` : '<p class="label">Morgens, nach der Toilette, vor dem Essen.</p>'}
+    <div class="row" style="margin-top:8px">
+      <input id="w-date" type="date" value="${t}" max="${t}" class="grow" aria-label="Datum">
+      <div class="unit-in grow"><input id="w-kg" inputmode="decimal" placeholder="${ws.length ? fmt(ws[ws.length - 1].kg, 1) : '74,5'}" aria-label="Gewicht in kg"><em>kg</em></div>
+    </div>
+    <div class="row" style="margin-top:10px">
+      <button class="grow" data-action="wadd-cancel">Abbrechen</button>
+      <button class="primary grow" data-action="save-weight">Speichern</button>
+    </div>
+  </div>`;
+}
+
+function viewStart() {
+  const ws = S.weights;
   const nu = nextUnit();
   const lastSession = S.sessions[S.sessions.length - 1];
 
   const weightCard = ws.length ? weekCard()
-    : '<p class="label">Gewicht</p><p class="muted">Noch keine Werte. Trag unten dein erstes Gewicht ein.</p>';
-
-  const kfaCard = m && m.kfa != null ? `
-    <p class="label">Körperfett · Navy-Methode · ${longDate(m.date)}</p>
-    <div class="big">${fmt(Math.max(m.kfa - NAVY_UNSICHERHEIT, 0), 0)}–${fmt(m.kfa + NAVY_UNSICHERHEIT, 0)} %</div>
-    <p class="label">Rechenwert ${fmt(m.kfa, 1)} %, Unsicherheit ca. ±${NAVY_UNSICHERHEIT} Prozentpunkte</p>` : `
-    <p class="label">Körperfett · Navy-Methode</p>
-    <p class="muted" style="margin:4px 0 0">Noch keine Messung.</p>
-    <button class="full" data-tab="masse">Maße eintragen</button>`;
+    : '<p class="label">Gewicht</p><p class="muted">Noch keine Werte. Trag dein erstes Gewicht ein.</p>';
 
   return `
-    <section class="card" id="wcard">${weightCard}</section>
-    <section class="card">
-      <h2>Gewicht eintragen</h2>
-      ${todayEntry ? `<p class="label">Heute schon eingetragen: ${fmt(todayEntry.kg, 1)} kg. Neuer Wert überschreibt ihn.</p>` : '<p class="label">Morgens, nach der Toilette, vor dem Essen.</p>'}
-      <div class="row" style="margin-top:8px">
-        <input id="w-date" type="date" value="${t}" max="${t}" class="grow" aria-label="Datum">
-        <div class="unit-in grow"><input id="w-kg" inputmode="decimal" placeholder="${ws.length ? fmt(ws[ws.length - 1].kg, 1) : '74,5'}" aria-label="Gewicht in kg"><em>kg</em></div>
-      </div>
-      <button class="primary full" data-action="save-weight">Speichern</button>
-    </section>
-    <section class="card">${kfaCard}</section>
+    <section class="card" id="wcard">${weightCard}${weightAdd()}</section>
     <section class="card">
       <div class="row between">
         <div>
@@ -570,12 +699,107 @@ function viewTraining() {
     </section>`;
 }
 
+/* Essen */
+function dishMeta(p) {
+  return `${fmtAmount(p.kcal)} kcal · ${fmtAmount(p.protein)} g Protein · ca. ${fmtEuro(p.preis)}`;
+}
+
+function recipeDetails(g, label = 'Rezept anzeigen') {
+  return `<details><summary>${label}</summary>
+    <p class="small muted">Zutaten (${g.portionenText || 'für den ganzen Block'}):</p>
+    <ul class="ing">${g.zutaten.map((z) => `<li>${z.menge != null ? `${fmtAmount(z.menge)} ${esc(unitFor(z.einheit, z.menge))} ` : ''}${esc(z.name)}${z.hinweis ? ` <span class="muted">(${esc(z.hinweis)})</span>` : ''}</li>`).join('')}</ul>
+    ${g.schritte ? `<ol class="steps">${g.schritte.map((s) => `<li>${esc(s)}</li>`).join('')}</ol>` : ''}
+    ${g.anleitung ? `<p>${esc(g.anleitung)}</p>` : ''}
+    ${g.aufbewahrung ? `<p class="small muted">Aufbewahrung: ${esc(g.aufbewahrung)}</p>` : ''}
+  </details>`;
+}
+
+function viewEssen() {
+  const E = S.essen;
+  if (!E || !E.data) {
+    return `<section class="card"><h2>Noch keine Rezepte</h2>
+      <p class="muted">Schreib Claude im Chat „Rezepte für nächste Woche“. Sobald sie fertig sind, erscheinen sie hier.</p></section>`;
+  }
+  const d = E.data;
+  const i = E.weeks.indexOf(E.name);
+  const sl = shoppingList(E);
+  const wk = isoWeek(d.von);
+
+  const blocks = d.bloecke.map((b) => {
+    const chosen = E.sel.auswahl[b.id];
+    return `<section class="card">
+      <div class="ex-head"><h2>${esc(b.name)} · ${esc(b.tage)}</h2><span class="pill">${b.portionen} Portionen</span></div>
+      <p class="label">Kochen: ${esc(b.kochen)}${chosen ? '' : ' · <span class="up">bitte ein Gericht wählen</span>'}</p>
+      ${b.gerichte.map((g) => `
+        <div class="dish ${chosen === g.id ? 'on' : ''}">
+          <div class="dish-head" data-action="pick" data-block="${esc(b.id)}" data-dish="${esc(g.id)}" role="button" aria-pressed="${chosen === g.id}">
+            <span class="radio" aria-hidden="true"></span>
+            <div class="grow">
+              <div class="dish-name">${esc(g.name)}</div>
+              <div class="label">${dishMeta(g.portion)} pro Portion · ${g.zeit} Min.</div>
+              ${g.kurz ? `<div class="small muted">${esc(g.kurz)}</div>` : ''}
+            </div>
+          </div>
+          ${recipeDetails({ ...g, portionenText: `für ${b.portionen} Portionen` })}
+        </div>`).join('')}
+    </section>`;
+  }).join('');
+
+  const snacks = (d.snacks || []).length ? `<section class="card">
+      <h2>Snacks</h2>
+      <p class="label">Ca. 3 pro Tag. Die Mengen sind schon in der Einkaufsliste.</p>
+      ${d.snacks.map((s) => `<div class="dish">
+        <div class="dish-name">${esc(s.name)} <span class="muted small">· ${s.proWoche}× pro Woche</span></div>
+        <div class="label">${dishMeta(s.portion)} pro Portion</div>
+        ${recipeDetails({ ...s, portionenText: `für ${s.proWoche} Portionen` }, 'So geht’s')}
+      </div>`).join('')}
+    </section>` : '';
+
+  const list = [...sl.groups.entries()].filter(([, items]) => items.length).map(([abt, items]) => `
+    <h3 class="abt">${esc(abt)}</h3>
+    ${abt === 'Vorrat' ? '<p class="label">Hast du das noch? Sonst mitnehmen.</p>' : ''}
+    <ul class="shop">${items.map((it) => `
+      <li class="${it.struck ? 'struck' : ''}" data-action="strike" data-name="${esc(it.name)}" role="button" aria-pressed="${it.struck}">
+        <span class="check" aria-hidden="true">${it.struck ? '✓' : ''}</span>
+        <span class="grow"><span class="it-name">${esc(it.name)}</span>
+          <span class="label">${mengenText(it.mengen)}${it.packs ? ` → kaufen: ${it.art.packung === 1 ? `${it.packs} ${esc(unitFor(it.art.einheit, it.packs))}` : `${it.packs}× ${fmtAmount(it.art.packung)} ${esc(it.art.einheit)}`}` : ''}</span></span>
+        ${it.preis != null ? `<span class="price">${fmtEuro(it.preis)}</span>` : ''}
+      </li>`).join('')}</ul>`).join('');
+
+  return `
+    <div class="week-nav">
+      <button class="ghost nav" data-action="eprev" ${i > 0 ? '' : 'disabled'} aria-label="Vorherige Woche">‹</button>
+      <div class="center">
+        <p class="label">Rezepte</p>
+        <div class="wk">KW ${wk.week} · ${shortDate(d.von)}–${shortDate(d.bis)}</div>
+      </div>
+      <button class="ghost nav" data-action="enext" ${i < E.weeks.length - 1 ? '' : 'disabled'} aria-label="Nächste Woche">›</button>
+    </div>
+    ${d.tagesrahmen || d.hinweis ? `<section class="card">
+      ${d.tagesrahmen ? `<p class="small" style="margin:0">${esc(d.tagesrahmen)}</p>` : ''}
+      ${d.hinweis ? `<p class="label" style="margin-top:6px">${esc(d.hinweis)}</p>` : ''}
+    </section>` : ''}
+    ${blocks}
+    ${snacks}
+    <section class="card">
+      <div class="row between"><h2 style="margin:0">Einkaufsliste</h2><span class="price big-price">ca. ${fmtEuro(sl.total)}</span></div>
+      <p class="label">Tippe an, was du schon hast. Preise sind Schätzungen für Edeka, ganze Packungen.</p>
+      ${sl.missing.length ? `<p class="hint warn">Noch nicht gewählt: ${sl.missing.map(esc).join(', ')}. Diese Zutaten fehlen noch in der Liste.</p>` : ''}
+      ${list}
+    </section>`;
+}
+
 /* Maße */
 function viewMasse() {
   const t = today();
   const last = S.masse[S.masse.length - 1];
   const hist = S.masse.slice().reverse();
   return `
+    ${last && last.kfa != null ? `<section class="card">
+      <p class="label">Körperfett · letzte Messung ${longDate(last.date)}</p>
+      <div class="big">${fmt(Math.max(last.kfa - NAVY_UNSICHERHEIT, 0), 0)}–${fmt(last.kfa + NAVY_UNSICHERHEIT, 0)} %</div>
+      <p class="label">Navy-Methode, Rechenwert ${fmt(last.kfa, 1)} %, Unsicherheit ca. ±${NAVY_UNSICHERHEIT} Prozentpunkte</p>
+    </section>` : ''}
     <section class="card">
       <h2>Maße eintragen</h2>
       <p class="label">Einmal im Monat, morgens. Bauch entspannt auf Höhe des Bauchnabels, Hals direkt unter dem Kehlkopf.</p>
@@ -691,7 +915,7 @@ async function storeWeight(btn, date, kg) {
       return weightFile(t, ws);
     }, `Gewicht ${date}: ${fmt(kg, 1)} kg`);
     S.weights = parseWeights(text);
-    Object.assign(ui, { wWeek: monday(date), wSel: null, wEdit: null, wDel: null });
+    Object.assign(ui, { wWeek: monday(date), wSel: null, wEdit: null, wDel: null, wAdd: false });
     toast(`${fmt(kg, 1)} kg gespeichert`);
     render({ keep: true });
   });
@@ -846,6 +1070,26 @@ document.addEventListener('click', (ev) => {
   }
   switch (el.dataset.action) {
     case 'save-weight': saveWeight(el); break;
+    case 'wadd': ui.wAdd = true; render({ keep: true }); $('#w-kg').focus(); break;
+    case 'wadd-cancel': ui.wAdd = false; render({ keep: true }); break;
+    case 'pick': {
+      const a = S.essen.sel.auswahl;
+      a[el.dataset.block] = a[el.dataset.block] === el.dataset.dish ? undefined : el.dataset.dish;
+      if (!a[el.dataset.block]) delete a[el.dataset.block];
+      queueSelSave();
+      render({ keep: true });
+      break;
+    }
+    case 'strike': {
+      const g = S.essen.sel.gestrichen;
+      const i = g.indexOf(el.dataset.name);
+      if (i >= 0) g.splice(i, 1); else g.push(el.dataset.name);
+      queueSelSave();
+      render({ keep: true });
+      break;
+    }
+    case 'eprev': switchEssenWeek(-1); break;
+    case 'enext': switchEssenWeek(1); break;
     case 'wprev': shiftWeek(-1); break;
     case 'wnext': shiftWeek(1); break;
     case 'wsel':
@@ -883,6 +1127,9 @@ document.addEventListener('keydown', (ev) => {
   if (ev.key === 'Enter' && ev.target.id === 'we-kg') $('[data-action="wedit-save"]').click();
   if (ev.key === 'Enter' && ev.target.id === 'l-token') login($('[data-action="login"]'));
 });
+
+// Wenn die App in den Hintergrund geht: offene Essens-Auswahl sofort speichern
+document.addEventListener('visibilitychange', () => { if (document.visibilityState === 'hidden') flushSel(); });
 
 // Wischen auf der Gewichtskarte: nach rechts = Vorwoche, nach links = nächste Woche
 let touchStart = null;

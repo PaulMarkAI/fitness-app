@@ -131,6 +131,30 @@ button.nav:disabled { opacity: 0.2; cursor: default; }
 .day-info { display: flex; justify-content: space-between; align-items: center; gap: 8px; margin-top: 8px; padding: 8px 10px; border-radius: 10px; background: var(--surface-2); font-size: 14px; flex-wrap: wrap; }
 .day-info .acts { display: flex; gap: 4px; }
 .day-info button { min-height: 36px; padding: 6px 10px; font-size: 13px; }
+.add-form { margin-top: 12px; padding-top: 12px; border-top: 1px solid var(--border); }
+#wcard > button.full { margin-top: 14px; }
+
+/* Essen */
+.dish { border: 1px solid var(--border); border-radius: 10px; padding: 10px 12px; margin-top: 10px; }
+.dish.on { border-color: var(--accent); background: var(--accent-dim); }
+.dish-head { display: flex; gap: 10px; align-items: flex-start; cursor: pointer; }
+.dish-name { font-weight: 600; }
+.radio { width: 20px; height: 20px; border-radius: 50%; border: 2px solid var(--muted); flex: none; margin-top: 2px; }
+.dish.on .radio { border-color: var(--accent); background: radial-gradient(var(--accent) 45%, transparent 50%); }
+ul.ing, ol.steps { margin: 6px 0 0; padding-left: 20px; font-size: 14px; }
+ol.steps li { margin-top: 4px; }
+h3.abt { font-size: 13px; font-weight: 600; color: var(--accent-text); margin: 16px 0 4px; text-transform: uppercase; letter-spacing: 0.4px; }
+ul.shop { list-style: none; margin: 0; padding: 0; }
+ul.shop li { display: flex; gap: 10px; align-items: center; padding: 9px 0; border-top: 1px solid var(--border); cursor: pointer; }
+ul.shop li:first-child { border-top: none; }
+ul.shop .it-name { display: block; }
+ul.shop .check { width: 22px; height: 22px; border-radius: 6px; border: 2px solid var(--muted); flex: none; display: flex; align-items: center; justify-content: center; font-size: 14px; color: var(--bg); }
+ul.shop li.struck .check { background: var(--accent); border-color: var(--accent); }
+ul.shop li.struck .it-name, ul.shop li.struck .price { text-decoration: line-through; color: var(--muted); }
+.price { font-size: 14px; white-space: nowrap; }
+.big-price { font-size: 18px; font-weight: 700; color: var(--accent-text); }
+.hint.warn { background: var(--warn-dim); color: var(--warn); }
+
 button.danger { color: var(--danger); border-color: var(--danger); background: transparent; }
 .legend i { display: inline-block; width: 10px; height: 10px; border-radius: 50%; margin-right: 5px; vertical-align: -1px; }
 
