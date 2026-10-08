@@ -169,6 +169,7 @@ ul.shop li.struck .check { background: var(--accent); border-color: var(--accent
 ul.shop li.struck .it-name, ul.shop li.struck .price { text-decoration: line-through; color: var(--muted); }
 .price { font-size: 14px; white-space: nowrap; }
 .big-price { font-size: 18px; font-weight: 700; color: var(--accent-text); }
+.trip { display: flex; justify-content: space-between; gap: 8px; margin-top: 16px; padding: 8px 10px; border-radius: 8px; background: var(--surface-2); font-weight: 600; font-size: 14px; }
 .hint.warn { background: var(--warn-dim); color: var(--warn); }
 
 button.danger { color: var(--danger); border-color: var(--danger); background: transparent; }

@@ -326,40 +326,54 @@ const PLURAL = { Dose: 'Dosen', Packung: 'Packungen', Zehe: 'Zehen' };
 function unitFor(einheit, n) { return n !== 1 && PLURAL[einheit] ? PLURAL[einheit] : (einheit || ''); }
 function fmtEuro(n) { return n.toFixed(2).replace('.', ',') + ' €'; }
 
+// Einkaufsliste in bis zu zwei Einkäufen:
+// Einkauf 1 = großer Einkauf. Einkauf 2 = nur Frischware („frisch“ im Artikelkatalog) von Blöcken
+// mit „zweiteinkauf“, weil Paul keinen Gefrierschrank hat und Fleisch nur 1–2 Tage hält.
 function shoppingList(E) {
   const d = E.data;
-  const items = new Map();
-  const add = (z) => {
-    const e = items.get(z.name) || { name: z.name, mengen: {} };
+  const trips = [new Map(), new Map()];
+  const add = (z, trip) => {
+    const map = trips[trip];
+    const e = map.get(z.name) || { name: z.name, mengen: {} };
     const u = z.einheit || '';
     e.mengen[u] = z.menge == null ? (e.mengen[u] ?? null) : (e.mengen[u] || 0) + z.menge;
-    items.set(z.name, e);
+    map.set(z.name, e);
   };
+  const tripFor = (b, z) => (b && b.zweiteinkauf && (d.artikel[z.name] || {}).frisch ? 1 : 0);
   const missing = [];
+  const lateDays = [];
   d.bloecke.forEach((b) => {
     const g = b.gerichte.find((x) => x.id === E.sel.auswahl[b.id]);
-    if (g) g.zutaten.forEach(add); else missing.push(b.name);
+    if (!g) { missing.push(b.name); return; }
+    g.zutaten.forEach((z) => add(z, tripFor(b, z)));
+    if (b.zweiteinkauf && g.zutaten.some((z) => tripFor(b, z))) lateDays.push(b.kochen);
   });
-  (d.snacks || []).forEach((s) => s.zutaten.forEach(add));
+  (d.snacks || []).forEach((s) => s.zutaten.forEach((z) => add(z, 0)));
 
-  const groups = new Map(ABTEILUNGEN.map((a) => [a, []]));
   let total = 0;
-  for (const e of items.values()) {
-    const art = d.artikel[e.name] || {};
-    const abt = art.vorrat ? 'Vorrat' : (art.abteilung || 'Sonstiges');
-    const menge = art.einheit != null ? e.mengen[art.einheit] : null;
-    let packs = null, preis = null;
-    if (!art.vorrat && menge != null && art.packung && art.preis != null) {
-      packs = Math.ceil(menge / art.packung - 1e-9);
-      preis = packs * art.preis;
+  const result = trips.map((map, ti) => {
+    const groups = new Map(ABTEILUNGEN.map((a) => [a, []]));
+    let sum = 0;
+    for (const e of map.values()) {
+      const art = d.artikel[e.name] || {};
+      const abt = art.vorrat ? 'Vorrat' : (art.abteilung || 'Sonstiges');
+      const menge = art.einheit != null ? e.mengen[art.einheit] : null;
+      let packs = null, preis = null;
+      if (!art.vorrat && menge != null && art.packung && art.preis != null) {
+        packs = Math.ceil(menge / art.packung - 1e-9);
+        preis = packs * art.preis;
+      }
+      const key = ti === 0 ? e.name : `2|${e.name}`; // Durchstreichen gilt je Einkauf getrennt
+      const struck = E.sel.gestrichen.includes(key);
+      if (preis != null && !struck) sum += preis;
+      if (!groups.has(abt)) groups.set(abt, []);
+      groups.get(abt).push({ name: e.name, key, mengen: e.mengen, art, packs, preis, struck });
     }
-    const struck = E.sel.gestrichen.includes(e.name);
-    if (preis != null && !struck) total += preis;
-    if (!groups.has(abt)) groups.set(abt, []);
-    groups.get(abt).push({ name: e.name, mengen: e.mengen, art, packs, preis, struck });
-  }
-  groups.forEach((list) => list.sort((a, b) => a.name.localeCompare(b.name, 'de')));
-  return { groups, total, missing };
+    groups.forEach((list) => list.sort((a, b) => a.name.localeCompare(b.name, 'de')));
+    total += sum;
+    return { groups, sum, empty: map.size === 0 };
+  });
+  return { trips: result, total, missing, lateDays };
 }
 
 function mengenText(mengen) {
@@ -823,11 +837,11 @@ function shopTile() {
   }
   const sl = shoppingList(E);
   const wk = isoWeek(E.data.von);
-  const list = [...sl.groups.entries()].filter(([, items]) => items.length).map(([abt, items]) => `
+  const listOf = (groups) => [...groups.entries()].filter(([, items]) => items.length).map(([abt, items]) => `
     <h3 class="abt">${esc(abt)}</h3>
     ${abt === 'Vorrat' ? '<p class="label">Hast du das noch? Sonst mitnehmen.</p>' : ''}
     <ul class="shop">${items.map((it) => `
-      <li class="${it.struck ? 'struck' : ''}" data-action="strike" data-name="${esc(it.name)}" role="button" aria-pressed="${it.struck}">
+      <li class="${it.struck ? 'struck' : ''}" data-action="strike" data-name="${esc(it.key)}" role="button" aria-pressed="${it.struck}">
         <span class="check" aria-hidden="true">${it.struck ? '✓' : ''}</span>
         <span class="grow"><span class="it-name">${esc(it.name)}</span>
           <span class="label">${mengenText(it.mengen)}${it.packs ? ` → kaufen: ${it.art.packung === 1 ? `${it.packs} ${esc(unitFor(it.art.einheit, it.packs))}` : `${it.packs}× ${fmtAmount(it.art.packung)} ${esc(it.art.einheit)}`}` : ''}</span></span>
@@ -840,7 +854,12 @@ function shopTile() {
     </div>
     <p class="label">Tippe an, was du schon hast. Preise sind Schätzungen für Edeka, ganze Packungen.</p>
     ${sl.missing.length ? `<p class="hint warn">Noch nicht gewählt: ${sl.missing.map(esc).join(', ')}. Die Gerichte wählst du unter „Essen“.</p>` : ''}
-    ${list}
+    ${sl.trips[1].empty ? listOf(sl.trips[0].groups) : `
+      <div class="trip"><span>Einkauf 1 · großer Einkauf</span><span class="price">ca. ${fmtEuro(sl.trips[0].sum)}</span></div>
+      ${listOf(sl.trips[0].groups)}
+      <div class="trip"><span>Einkauf 2 · am ${esc(sl.lateDays[0])} vor dem Kochen</span><span class="price">ca. ${fmtEuro(sl.trips[1].sum)}</span></div>
+      <p class="label">Nur Frischfleisch – hält ohne Gefrierschrank nur 1–2 Tage.</p>
+      ${listOf(sl.trips[1].groups)}`}
   </section>`;
 }
 
