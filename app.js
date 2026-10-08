@@ -605,9 +605,9 @@ function viewStart() {
     : '<p class="label">Gewicht</p><p class="muted">Noch keine Werte. Trag dein erstes Gewicht ein.</p>';
 
   return `
-    ${calTile()}
-    ${shopTile()}
     <section class="card" id="wcard">${weightCard}${weightAdd()}</section>
+    ${shopTile()}
+    ${calTile()}
     <section class="card">
       <div class="row between">
         <div>
