@@ -10,12 +10,14 @@
 const LOCAL = ['localhost', '127.0.0.1'].includes(location.hostname);
 const API = LOCAL ? '/api' : 'https://api.github.com';
 
-const FILES = { gewicht: 'gewicht.md', masse: 'masse.md', log: 'trainingslog.md', plan: 'trainingsplan.json', kalender: 'kalender.json' };
+const FILES = { gewicht: 'gewicht.md', masse: 'masse.md', log: 'trainingslog.md', plan: 'trainingsplan.json', kalender: 'kalender.json', bewertung: 'fotobewertung.json' };
+const FOTO_RE = /^(\d{4}-\d{2}-\d{2})-(vorne|seite|hinten)\.jpg$/;
+const FOTO_POS = [['vorne', 'Vorne'], ['seite', 'Seite'], ['hinten', 'Hinten']];
 const HEAD = { eintraege: '## Einträge', wochen: '## Wochendurchschnitte', einheiten: '## Einheiten', saetze: '## Sätze' };
 const COLS = {
   gewicht: ['Datum', 'Gewicht (kg)', 'Notiz'],
   wochen: ['Woche', 'Durchschnitt (kg)', 'Tage gemessen', 'Veränderung (kg)'],
-  masse: ['Datum', 'Größe (cm)', 'Hals (cm)', 'Bauch (cm)', 'KFA Navy (%)', 'Notiz'],
+  masse: ['Datum', 'Größe (cm)', 'Hals (cm)', 'Bauch (cm)', 'Oberarm (cm)', 'Unterarm (cm)', 'Brust (cm)', 'Oberschenkel (cm)', 'Wade (cm)', 'KFA Navy (%)', 'Notiz'],
   einheiten: ['Datum', 'Einheit', 'Ort', 'Gefühl', 'Notiz'],
   saetze: ['Datum', 'Einheit', 'Übung', 'S1 Wdh', 'S1 kg', 'S2 Wdh', 'S2 kg', 'S3 Wdh', 'S3 kg', 'ID'],
 };
@@ -112,7 +114,7 @@ function findTable(text, heading) {
   const start = i;
   let end = i;
   while (end < lines.length && lines[end].trim().startsWith('|')) end++;
-  return { lines, h, start, end, rows: lines.slice(start + 2, end).map(splitRow) };
+  return { lines, h, start, end, header: splitRow(lines[start]), rows: lines.slice(start + 2, end).map(splitRow) };
 }
 
 function readTable(text, heading) {
@@ -156,15 +158,46 @@ function navy(groesse, hals, bauch) {
   return Number.isFinite(kfa) && kfa > 0 && kfa < 60 ? kfa : null;
 }
 
+// Umfänge für den Muskel-Fortschritt (monatlich, rechte Körperseite)
+const UMFAENGE = [['oberarm', 'Oberarm'], ['unterarm', 'Unterarm'], ['brust', 'Brust'], ['oberschenkel', 'Oberschenkel'], ['wade', 'Wade']];
+
+// Spalten werden über ihren Namen gefunden, damit neue Spalten alte Einträge nicht verschieben
 function parseMasse(text) {
-  return readTable(text, HEAD.eintraege)
+  if (!text) return [];
+  const t = findTable(text, HEAD.eintraege);
+  if (!t.rows) return [];
+  const idx = (label) => t.header.findIndex((h) => h.toLowerCase().startsWith(label.toLowerCase()));
+  const col = { groesse: idx('Größe'), hals: idx('Hals'), bauch: idx('Bauch'), kfa: idx('KFA'), note: idx('Notiz') };
+  UMFAENGE.forEach(([k, label]) => { col[k] = idx(label); });
+  const get = (r, k) => (col[k] >= 0 ? r[col[k]] : undefined);
+  return t.rows
     .filter((r) => DATE_RE.test(r[0]))
     .map((r) => {
-      const m = { date: r[0], groesse: num(r[1]), hals: num(r[2]), bauch: num(r[3]), note: r[5] || '' };
-      m.kfa = num(r[4]) ?? navy(m.groesse, m.hals, m.bauch);
+      const m = { date: r[0], groesse: num(get(r, 'groesse')), hals: num(get(r, 'hals')), bauch: num(get(r, 'bauch')), note: get(r, 'note') || '' };
+      UMFAENGE.forEach(([k]) => { m[k] = num(get(r, k)); });
+      m.kfa = num(get(r, 'kfa')) ?? navy(m.groesse, m.hals, m.bauch);
       return m;
     })
     .sort(byDate);
+}
+
+// Muskelmasse-Score aus dem FFMI (Kouri et al. 1995): normalisierter FFMI ÷ 25 (natürliche Obergrenze) × 100
+function ffmiInfo() {
+  const m = [...S.masse].reverse().find((x) => x.kfa != null && x.groesse);
+  if (!m || !S.weights.length) return null;
+  const mon = monday(m.date);
+  const wk = S.weights.filter((w) => w.date >= mon && w.date <= addDays(mon, 6));
+  const nearest = S.weights.reduce((best, w) =>
+    Math.abs(parseDate(w.date) - parseDate(m.date)) < Math.abs(parseDate(best.date) - parseDate(m.date)) ? w : best);
+  const kg = wk.length ? avgOf(wk) : nearest.kg;
+  const h = m.groesse / 100;
+  const calc = (kfa) => (kg * (1 - kfa / 100)) / (h * h) + 6.1 * (1.8 - h);
+  const norm = calc(m.kfa);
+  return {
+    date: m.date, kg, kfa: m.kfa, norm,
+    lo: calc(m.kfa + NAVY_UNSICHERHEIT), hi: calc(Math.max(m.kfa - NAVY_UNSICHERHEIT, 0)),
+    score: Math.min(100, Math.round((norm / 25) * 100)),
+  };
 }
 
 function parseLog(text) {
@@ -216,8 +249,9 @@ function headers(extra = {}) {
   if (!LOCAL) h.Authorization = 'Bearer ' + cfg.token;
   return h;
 }
-function repoUrl() { return `${API}/repos/${encodeURIComponent(cfg.owner)}/${encodeURIComponent(cfg.repo)}`; }
-function fileUrl(path) { return `${repoUrl()}/contents/${path.split('/').map(encodeURIComponent).join('/')}`; }
+const FOTO_REPO = 'fitness-fotos'; // eigenes privates Repository nur für Körperbilder
+function repoUrl(repo = cfg.repo) { return `${API}/repos/${encodeURIComponent(cfg.owner)}/${encodeURIComponent(repo)}`; }
+function fileUrl(path, repo = cfg.repo) { return `${repoUrl(repo)}/contents/${path.split('/').map(encodeURIComponent).join('/')}`; }
 
 async function request(url, opts = {}) {
   let r;
@@ -263,6 +297,74 @@ async function updateFile(path, mutate, message) {
   throw new ApiError('conflict', 'Die Datei wurde gleichzeitig woanders geändert. Bitte nochmal speichern.');
 }
 
+/* ---------- Fotos (Repository fitness-fotos) ---------- */
+const FOTO_NOACCESS = 'Kein Zugriff auf „fitness-fotos“. Prüfe, ob das Repository existiert und dein Schlüssel es bei „Repository access“ enthält.';
+
+async function fotoList() {
+  const r = await request(fileUrl('fotos', FOTO_REPO), { headers: headers() });
+  if (r.status === 404) {
+    // leerer Ordner oder kein Zugriff: am Repository selbst unterscheiden
+    const repo = await request(repoUrl(FOTO_REPO), { headers: headers() });
+    if (!repo.ok) throw new ApiError('noaccess', FOTO_NOACCESS);
+    return [];
+  }
+  if (r.status === 403) throw new ApiError('noaccess', FOTO_NOACCESS);
+  if (!r.ok) throw new ApiError('http', `Fotos laden fehlgeschlagen (${r.status}).`);
+  const j = await r.json();
+  return Array.isArray(j) ? j.filter((f) => f.type === 'file' && FOTO_RE.test(f.name)).map((f) => f.name).sort() : [];
+}
+
+async function fotoBlob(name) {
+  const url = fileUrl(`fotos/${name}`, FOTO_REPO);
+  // Zeitgrenze, damit ein hängendes Foto nicht ewig „lädt“
+  const ctrl = new AbortController();
+  const timer = setTimeout(() => ctrl.abort(), 20000);
+  try {
+    if (LOCAL) {
+      const j = await (await request(url, { headers: headers(), signal: ctrl.signal })).json();
+      const bin = atob(j.content.replace(/\s/g, ''));
+      return new Blob([Uint8Array.from(bin, (c) => c.charCodeAt(0))], { type: 'image/jpeg' });
+    }
+    const r = await request(url, { headers: headers({ Accept: 'application/vnd.github.raw' }), signal: ctrl.signal });
+    if (!r.ok) throw new ApiError('http', `Foto laden fehlgeschlagen (${r.status}).`);
+    return await r.blob();
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
+async function fotoUpload(name, b64) {
+  const url = fileUrl(`fotos/${name}`, FOTO_REPO);
+  const old = await request(url, { headers: headers() });
+  const sha = old.ok ? (await old.json()).sha : null; // gleicher Tag, gleiche Ansicht: Foto ersetzen
+  const body = { message: `Foto ${name}`, content: b64 };
+  if (sha) body.sha = sha;
+  const r = await request(url, { method: 'PUT', headers: headers({ 'Content-Type': 'application/json' }), body: JSON.stringify(body) });
+  if (r.status === 403 || r.status === 404) throw new ApiError('noaccess', FOTO_NOACCESS);
+  if (!r.ok) throw new ApiError('http', `Hochladen fehlgeschlagen (${r.status}).`);
+}
+
+// Verkleinert das Foto (längste Seite 1600 px, JPEG) – ca. 200–400 KB statt mehrerer MB
+async function shrinkImage(file, maxSide = 1600, quality = 0.82) {
+  const url = URL.createObjectURL(file);
+  try {
+    const img = await new Promise((res, rej) => {
+      const i = new Image();
+      i.onload = () => res(i);
+      i.onerror = () => rej(new ApiError('http', 'Das Bild konnte nicht gelesen werden.'));
+      i.src = url;
+    });
+    const scale = Math.min(1, maxSide / Math.max(img.naturalWidth, img.naturalHeight));
+    const c = document.createElement('canvas');
+    c.width = Math.round(img.naturalWidth * scale);
+    c.height = Math.round(img.naturalHeight * scale);
+    c.getContext('2d').drawImage(img, 0, 0, c.width, c.height);
+    return c.toDataURL('image/jpeg', quality).split(',')[1];
+  } finally {
+    URL.revokeObjectURL(url);
+  }
+}
+
 async function listDir(path) {
   const r = await request(fileUrl(path), { headers: headers() });
   if (r.status === 404) return [];
@@ -273,8 +375,9 @@ async function listDir(path) {
 }
 
 async function loadAll() {
-  const [g, m, l, p, k, dir] = await Promise.all([
-    getFile(FILES.gewicht), getFile(FILES.masse), getFile(FILES.log), getFile(FILES.plan), getFile(FILES.kalender), listDir('essen'),
+  const [g, m, l, p, k, fb, dir] = await Promise.all([
+    getFile(FILES.gewicht), getFile(FILES.masse), getFile(FILES.log), getFile(FILES.plan), getFile(FILES.kalender),
+    getFile(FILES.bewertung), listDir('essen'),
   ]);
   if (!p.text) throw new ApiError('data', '„trainingsplan.json“ fehlt im Daten-Repository.');
   let plan;
@@ -285,7 +388,11 @@ async function loadAll() {
   const essen = { weeks, ...(await loadWeek(keep)) };
   let kalender = null;
   if (k.text) { try { kalender = JSON.parse(k.text); } catch (e) { /* defekt: Kachel zeigt Hinweis */ } }
-  S = { plan, weights: parseWeights(g.text), masse: parseMasse(m.text), sessions: log.sessions, sets: log.sets, essen, kalender };
+  let bewertung = null;
+  if (fb.text) { try { bewertung = JSON.parse(fb.text); } catch (e) { /* defekt: wird ignoriert */ } }
+  // Fotos werden erst beim Öffnen des Reiters geladen (spart Datenvolumen)
+  const fotos = S.fotos || { loaded: false, files: [], error: null };
+  S = { plan, weights: parseWeights(g.text), masse: parseMasse(m.text), sessions: log.sessions, sets: log.sets, essen, kalender, bewertung, fotos };
 }
 
 /* ---------- Essen: Wochenrezepte und Einkaufsliste ---------- */
@@ -458,12 +565,12 @@ const ICONS = {
   training: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M6 7v10M18 7v10M3 9v6M21 9v6M6 12h12"/></svg>',
   essen: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M7 3v18M4 3v5a3 3 0 0 0 6 0V3M17 21V3c-2.5 1.5-4 4-4 7v3h4"/></svg>',
   masse: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="2" y="8" width="20" height="8" rx="2"/><path d="M6 8v3M10 8v4M14 8v3M18 8v4"/></svg>',
-  plan: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M9 6h11M9 12h11M9 18h11M4 6h.01M4 12h.01M4 18h.01"/></svg>',
+  fotos: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M4 8h3l2-3h6l2 3h3v11H4z"/><circle cx="12" cy="13" r="3.5"/></svg>',
 };
-const TABS = [['start', 'Übersicht'], ['training', 'Training'], ['essen', 'Essen'], ['masse', 'Maße'], ['plan', 'Plan']];
+const TABS = [['start', 'Übersicht'], ['training', 'Training'], ['essen', 'Essen'], ['masse', 'Maße'], ['fotos', 'Fotos']];
 
 function render(opts = {}) {
-  const views = { start: viewStart, training: viewTraining, essen: viewEssen, masse: viewMasse, plan: viewPlan };
+  const views = { start: viewStart, training: viewTraining, essen: viewEssen, masse: viewMasse, fotos: viewFotos };
   const scroll = window.scrollY;
   const title = TABS.find((t) => t[0] === ui.tab)[1];
   $('#app').innerHTML = `
@@ -480,6 +587,10 @@ function render(opts = {}) {
       ${TABS.map(([k, l]) => `<button data-tab="${k}" class="${ui.tab === k ? 'on' : ''}">${ICONS[k]}${l}</button>`).join('')}
     </div></nav>`;
   if (ui.tab === 'masse') updateNavyPreview();
+  if (ui.tab === 'fotos') {
+    if (!S.fotos.loaded && !ui.fotosLoading) { ui.fotosLoading = true; loadFotos().finally(() => { ui.fotosLoading = false; }); }
+    else hydrateFotos();
+  }
   window.scrollTo(0, opts.keep ? scroll : 0);
 }
 
@@ -881,6 +992,11 @@ function viewMasse() {
       <label class="field"><span>Größe</span><div class="unit-in"><input id="m-groesse" inputmode="decimal" value="${last && last.groesse ? fmtKg(last.groesse) : ''}" placeholder="z. B. 175"><em>cm</em></div></label>
       <label class="field"><span>Hals</span><div class="unit-in"><input id="m-hals" inputmode="decimal" placeholder="${last && last.hals ? fmtKg(last.hals) : 'z. B. 37,5'}"><em>cm</em></div></label>
       <label class="field"><span>Bauch</span><div class="unit-in"><input id="m-bauch" inputmode="decimal" placeholder="${last && last.bauch ? fmtKg(last.bauch) : 'z. B. 82'}"><em>cm</em></div></label>
+      <h3 class="abt">Umfänge für den Muskel-Fortschritt</h3>
+      <p class="label">Rechte Seite, stehend. Oberarm angespannt an der dicksten Stelle, Unterarm und Wade entspannt an der dicksten Stelle, Brust entspannt auf Höhe der Brustwarzen nach normalem Ausatmen, Oberschenkel entspannt direkt unter der Gesäßfalte.</p>
+      <div class="umf-grid">
+        ${UMFAENGE.map(([k, label]) => `<label class="field"><span>${label}</span><div class="unit-in"><input id="m-${k}" inputmode="decimal" placeholder="${last && last[k] ? fmtKg(last[k]) : ''}"><em>cm</em></div></label>`).join('')}
+      </div>
       <label class="field"><span>Notiz (optional)</span><input id="m-note"></label>
       <div class="card" style="background:var(--surface-2);margin-top:12px">
         <p class="label">Körperfett (Navy-Methode)</p>
@@ -901,27 +1017,140 @@ function updateNavyPreview() {
   el.textContent = k == null ? '–' : `${fmt(Math.max(k - NAVY_UNSICHERHEIT, 0), 0)}–${fmt(k + NAVY_UNSICHERHEIT, 0)} % (${fmt(k, 1)} %)`;
 }
 
-/* Plan */
-function viewPlan() {
-  const p = S.plan;
-  return `
-    <section class="card">
-      <p class="label">Version ${esc(p.version)} · Stand ${esc(p.stand)}</p>
-      <p class="small" style="margin:6px 0 0">Reihenfolge ${p.reihenfolge.map(esc).join(' → ')}, immer im Wechsel, egal an welchem Wochentag. 1–2 Wiederholungen in Reserve. Erreichst du in allen Sätzen das obere Ende, wird gesteigert.</p>
-      <p class="label" style="margin-top:6px">Änderungen am Plan macht Claude. Die App zeigt ihn nur an.</p>
-    </section>
-    ${p.reihenfolge.map((k) => {
-      const E = p.einheiten[k];
-      return `<section class="card">
-        <h2>${esc(E.name)} <span class="muted small">· ${esc(E.ort)}</span></h2>
-        ${E.uebungen.map((ex) => `
-          <details>
-            <summary><span style="color:var(--text)">${esc(ex.name)}</span>${ex.nur ? ` <span class="muted">(${ex.nur === 'park' ? 'Park' : 'zu Hause'})</span>` : ''} · ${ex.saetze} × ${ex.wdh[0]}–${ex.wdh[1]}${ex.start ? ` · Start ${fmtKg(ex.start)} ${LAST_LABEL[ex.last]}` : ''}</summary>
-            <p>${esc(ex.technik)}</p>
-            <p class="muted">Steigerung: ${esc(ex.steigerung)}</p>
-          </details>`).join('')}
-      </section>`;
-    }).join('')}`;
+/* Fotos */
+function fotoDates() {
+  return [...new Set(S.fotos.files.map((n) => n.match(FOTO_RE)[1]))].sort();
+}
+
+function fotoImg(name, cls = '') {
+  return name ? `<img class="foto ${cls}" data-foto="${esc(name)}" alt="Foto ${esc(name)}">` : '<div class="foto empty">kein Foto</div>';
+}
+
+function viewFotos() {
+  const F = S.fotos;
+  const t = today();
+  const upload = `<section class="card">
+    <h2>Foto hinzufügen</h2>
+    <p class="label">Einmal pro Woche, gleiches Licht, gleiche Uhrzeit (am besten morgens), gleiche Haltung.</p>
+    <div class="row" style="margin-top:10px">
+      ${FOTO_POS.map(([k, l]) => {
+        const done = F.files.includes(`${t}-${k}.jpg`);
+        return `<button class="grow ${done ? '' : 'primary'}" data-action="foto-pick" data-pos="${k}">${done ? '✓ ' : '+ '}${l}</button>
+          <input type="file" accept="image/*" data-pos="${k}" hidden>`;
+      }).join('')}
+    </div>
+    <p class="label" style="margin-top:8px">Fotos von heute ersetzen das alte Foto derselben Ansicht.</p>
+  </section>`;
+
+  if (!F.loaded) return upload + '<p class="loading" style="margin-top:20px">Fotos werden geladen …</p>';
+  if (F.error) return upload + `<section class="card"><p class="error">${esc(F.error)}</p><button class="full" data-action="foto-reload">Nochmal versuchen</button></section>`;
+
+  const dates = fotoDates();
+  const pos = ui.fotoPos || 'vorne';
+  const name = (d, p) => (F.files.includes(`${d}-${p}.jpg`) ? `${d}-${p}.jpg` : null);
+  const first = dates.find((d) => name(d, pos));
+  const last = [...dates].reverse().find((d) => name(d, pos));
+
+  const compare = dates.length ? `<section class="card">
+    <h2>Vergleich</h2>
+    <div class="seg" style="margin-top:6px">${FOTO_POS.map(([k, l]) => `<button data-action="foto-pos" data-pos="${k}" class="${pos === k ? 'on' : ''}">${l}</button>`).join('')}</div>
+    ${first && last && first !== last ? `<div class="pair">
+        <figure>${fotoImg(name(first, pos))}<figcaption>Start · ${shortDate(first)}</figcaption></figure>
+        <figure>${fotoImg(name(last, pos))}<figcaption>Aktuell · ${shortDate(last)}</figcaption></figure>
+      </div>` : `<div class="pair one"><figure>${fotoImg(last && name(last, pos))}<figcaption>${last ? shortDate(last) : ''}</figcaption></figure></div>
+      <p class="label">Der Vergleich erscheint, sobald es Fotos von zwei verschiedenen Tagen gibt.</p>`}
+  </section>` : '';
+
+  const history = dates.length ? `<section class="card">
+    <h2>Alle Fotos</h2>
+    ${[...dates].reverse().map((d) => `<details class="foto-day">
+      <summary>${WEEKDAY_SHORT[parseDate(d).getDay()]}, ${longDate(d)}</summary>
+      <div class="trio">${FOTO_POS.map(([k]) => fotoImg(name(d, k), 'small')).join('')}</div>
+    </details>`).join('')}
+  </section>` : '';
+
+  return upload + bewertungCard() + compare + history;
+}
+
+// Bewertung: FFMI-Score (berechnet), Umfang-Fortschritt (gemessen), Claudes Einschätzung (aus Fotos)
+function bewertungCard() {
+  const f = ffmiInfo();
+  const ms = S.masse;
+  const prog = UMFAENGE.map(([k, label]) => {
+    const withVal = ms.filter((m) => m[k] != null);
+    if (!withVal.length) return null;
+    const a = withVal[0], b = withVal[withVal.length - 1];
+    return { label, now: b[k], diff: withVal.length > 1 ? b[k] - a[k] : null, since: a.date };
+  }).filter(Boolean);
+  const B = S.bewertung && S.bewertung.bewertungen && S.bewertung.bewertungen[S.bewertung.bewertungen.length - 1];
+
+  const ffmi = f ? `
+    <p class="label">Muskelmasse-Score (FFMI) · Messung ${longDate(f.date)}</p>
+    <div class="row" style="align-items:baseline;gap:10px"><span class="big">${f.score}/100</span><span class="small muted">FFMI ${fmt(f.norm, 1)} (Bereich ${fmt(f.lo, 1)}–${fmt(f.hi, 1)})</span></div>
+    <p class="label">Normalisierter FFMI ÷ 25 × 100. 25 gilt als natürliche Obergrenze ohne Doping (Kouri et al. 1995). Der Bereich kommt von der Unsicherheit beim Körperfett.</p>`
+    : '<p class="label">Muskelmasse-Score (FFMI)</p><p class="muted small">Erscheint nach der ersten Messung unter „Maße“ (Größe, Hals, Bauch).</p>';
+
+  const umf = prog.length ? `<h3 class="abt">Umfänge</h3><ul class="list umf-list">${prog.map((p) => `
+      <li><span>${p.label}</span><span>${fmtKg(p.now)} cm</span>
+      <span class="${p.diff == null ? 'muted' : p.diff > 0 ? 'down' : 'up'}">${p.diff == null ? 'Startwert' : `${p.diff > 0 ? '+' : ''}${fmt(p.diff, 1)} cm`}</span></li>`).join('')}</ul>`
+    : '<h3 class="abt">Umfänge</h3><p class="muted small">Noch keine Umfänge gemessen (unter „Maße“, einmal im Monat).</p>';
+
+  const claude = B ? `<h3 class="abt">Claudes Einschätzung · ${longDate(B.datum)}</h3>
+    <p class="label">Aus deinen Fotos vom ${longDate(B.fotosVom)}. Einschätzung, keine Messung.</p>
+    <ul class="list">${(B.muskeln || []).map((m) => `<li class="col"><div class="row between"><b>${esc(m.name)}</b><span class="pill">${esc(m.note)}/10</span></div><span class="small muted">${esc(m.text)}</span></li>`).join('')}</ul>
+    ${B.fazit ? `<p class="small" style="margin-top:8px">${esc(B.fazit)}</p>` : ''}`
+    : '<h3 class="abt">Claudes Einschätzung</h3><p class="muted small">Kommt bei der nächsten „Wochenplanung“, sobald Fotos da sind.</p>';
+
+  return `<section class="card"><h2>Bewertung</h2>${ffmi}${umf}${claude}</section>`;
+}
+
+async function loadFotos() {
+  try {
+    S.fotos = { loaded: true, files: await fotoList(), error: null };
+  } catch (e) {
+    if (e.kind === 'auth') return logout(e.message);
+    S.fotos = { loaded: true, files: [], error: e.message };
+  }
+  if (ui.tab === 'fotos') { render({ keep: true }); hydrateFotos(); }
+}
+
+// Fotos erst laden, wenn sie sichtbar sind (nicht in zugeklappten Tagen)
+// Pro Foto nur eine Anfrage, auch wenn es mehrfach gleichzeitig angezeigt wird
+const fotoCache = new Map(); // Name → Promise mit Bild-URL
+function fotoUrl(n) {
+  if (!fotoCache.has(n)) {
+    fotoCache.set(n, fotoBlob(n).then((b) => URL.createObjectURL(b)).catch((e) => { fotoCache.delete(n); throw e; }));
+  }
+  return fotoCache.get(n);
+}
+async function hydrateFotos() {
+  for (const img of document.querySelectorAll('img[data-foto]:not([src])')) {
+    if (img.closest('details:not([open])')) continue;
+    try {
+      img.src = await fotoUrl(img.dataset.foto);
+    } catch (e) {
+      img.replaceWith(Object.assign(document.createElement('div'), { className: 'foto empty', textContent: 'Fehler beim Laden' }));
+    }
+  }
+}
+
+async function uploadFoto(pos, file) {
+  if (!file) return;
+  const name = `${today()}-${pos}.jpg`;
+  toast('Foto wird verkleinert und hochgeladen …');
+  try {
+    const b64 = await shrinkImage(file);
+    await fotoUpload(name, b64);
+    fotoCache.delete(name);
+    if (!S.fotos.files.includes(name)) S.fotos.files.push(name);
+    S.fotos.files.sort();
+    toast('Foto gespeichert');
+    render({ keep: true });
+    hydrateFotos();
+  } catch (e) {
+    if (e.kind === 'auth') return logout(e.message);
+    toast(e.message, true);
+  }
 }
 
 /* Sperrbildschirm */
@@ -1021,13 +1250,21 @@ async function saveMasse(btn) {
   if (!bauch || bauch < 50 || bauch > 200) return toast('Bitte den Bauchumfang in cm eingeben.', true);
   const kfa = navy(groesse, hals, bauch);
   if (kfa == null) return toast('Mit diesen Werten lässt sich nichts berechnen. Bauch muss größer als Hals sein.', true);
+  const umf = {};
+  for (const [k, label] of UMFAENGE) {
+    const el = $(`#m-${k}`);
+    const v = el && el.value.trim() !== '' ? num(el.value) : null;
+    if (el && el.value.trim() !== '' && (v == null || v < 15 || v > 150)) return toast(`${label}: bitte einen Umfang in cm eingeben.`, true);
+    umf[k] = v;
+  }
   await busy(btn, async () => {
     const text = await updateFile(FILES.masse, (t) => {
       const ms = parseMasse(t).filter((m) => m.date !== date);
-      ms.push({ date, groesse, hals, bauch, kfa, note });
+      ms.push({ date, groesse, hals, bauch, ...umf, kfa, note });
       ms.sort(byDate);
       return writeTable(t || TEMPLATES.masse, HEAD.eintraege, COLS.masse,
-        ms.map((m) => [m.date, fmtKg(m.groesse), fmtKg(m.hals), fmtKg(m.bauch), m.kfa != null ? fmt(m.kfa, 1) : '', m.note]));
+        ms.map((m) => [m.date, fmtKg(m.groesse), fmtKg(m.hals), fmtKg(m.bauch),
+          ...UMFAENGE.map(([k]) => fmtKg(m[k])), m.kfa != null ? fmt(m.kfa, 1) : '', m.note]));
     }, `Maße ${date}`);
     S.masse = parseMasse(text);
     toast(`Gespeichert: ${fmt(kfa, 1)} % Körperfett`);
@@ -1145,6 +1382,9 @@ document.addEventListener('click', (ev) => {
   switch (el.dataset.action) {
     case 'save-weight': saveWeight(el); break;
     case 'cal-toggle': ui.calOpen = !ui.calOpen; render({ keep: true }); break;
+    case 'foto-pick': document.querySelector(`input[type="file"][data-pos="${el.dataset.pos}"]`).click(); break;
+    case 'foto-pos': ui.fotoPos = el.dataset.pos; render({ keep: true }); break;
+    case 'foto-reload': S.fotos = { loaded: false, files: [], error: null }; render(); break;
     case 'shop-toggle': ui.shopOpen = !ui.shopOpen; render({ keep: true }); break;
     case 'wadd': ui.wAdd = true; render({ keep: true }); $('#w-kg').focus(); break;
     case 'wadd-cancel': ui.wAdd = false; render({ keep: true }); break;
@@ -1193,7 +1433,16 @@ document.addEventListener('input', (ev) => {
   if (['m-groesse', 'm-hals', 'm-bauch'].includes(ev.target.id)) updateNavyPreview();
 });
 
+// Fotos in einem Tag erst beim Aufklappen laden („toggle“ blubbert nicht, daher Capture)
+document.addEventListener('toggle', (ev) => { if (ev.target.matches && ev.target.matches('details.foto-day') && ev.target.open) hydrateFotos(); }, true);
+
 document.addEventListener('change', (ev) => {
+  if (ev.target.matches('input[type="file"][data-pos]')) {
+    const file = ev.target.files && ev.target.files[0];
+    ev.target.value = ''; // gleiches Foto später erneut wählbar
+    uploadFoto(ev.target.dataset.pos, file);
+    return;
+  }
   // Datum gewechselt: neu anzeigen, damit „Letztes Mal“ und gespeicherte Werte zum Datum passen
   if (ev.target.id === 't-date' && validDate(ev.target.value)) { ui.tDate = ev.target.value; render(); }
 });
