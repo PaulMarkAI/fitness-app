@@ -1202,7 +1202,13 @@ document.addEventListener('touchend', (ev) => {
 }, { passive: true });
 
 if ('serviceWorker' in navigator && !LOCAL) {
-  navigator.serviceWorker.register('sw.js').catch(() => { /* App funktioniert auch ohne */ });
+  // Neue App-Version gefunden: einmal automatisch neu laden, damit sie sofort gilt
+  const hadController = !!navigator.serviceWorker.controller;
+  let reloaded = false;
+  navigator.serviceWorker.addEventListener('controllerchange', () => {
+    if (hadController && !reloaded) { reloaded = true; flushSel().finally(() => location.reload()); }
+  });
+  navigator.serviceWorker.register('sw.js').then((r) => r.update()).catch(() => { /* App funktioniert auch ohne */ });
 }
 
 boot();

@@ -1,6 +1,6 @@
 // Service Worker: macht die App installierbar und lädt die App-Dateien auch bei schlechtem Netz.
 // Zuerst wird immer das Netz gefragt, damit Updates sofort ankommen. Daten von GitHub werden nie zwischengespeichert.
-const CACHE = 'fitness-v6';
+const CACHE = 'fitness-v7';
 const SHELL = ['./', './index.html', './style.css', './app.js', './manifest.webmanifest',
   './icons/icon-192.png', './icons/icon-512.png', './icons/apple-touch-icon.png'];
 
@@ -17,8 +17,9 @@ self.addEventListener('activate', (e) => {
 self.addEventListener('fetch', (e) => {
   const url = new URL(e.request.url);
   if (e.request.method !== 'GET' || url.origin !== location.origin) return;
+  // cache: 'no-cache' umgeht den 10-Minuten-Browsercache von GitHub Pages (fragt per ETag nach, ob es Neues gibt)
   e.respondWith(
-    fetch(e.request)
+    fetch(e.request.url, { cache: 'no-cache', credentials: 'same-origin' })
       .then((res) => {
         const copy = res.clone();
         caches.open(CACHE).then((c) => c.put(e.request, copy));
