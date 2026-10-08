@@ -134,6 +134,22 @@ button.nav:disabled { opacity: 0.2; cursor: default; }
 .add-form { margin-top: 12px; padding-top: 12px; border-top: 1px solid var(--border); }
 #wcard > button.full { margin-top: 14px; }
 
+/* Kalender-Kachel */
+.cal-head { display: flex; justify-content: space-between; align-items: center; cursor: pointer; min-height: 28px; }
+.cal-title { font-size: 16px; font-weight: 600; }
+.chev { font-size: 24px; line-height: 1; color: var(--muted); transition: transform .2s; }
+.chev.open { transform: rotate(90deg); }
+ul.cal-list { list-style: none; margin: 8px 0 0; padding: 0; }
+ul.cal-list li { display: flex; gap: 10px; align-items: center; padding: 8px 0; border-top: 1px solid var(--border); font-size: 15px; }
+ul.cal-list li:first-child { border-top: none; }
+ul.cal-list li.past { opacity: 0.45; }
+ul.cal-list .bar { width: 4px; align-self: stretch; border-radius: 2px; flex: none; }
+ul.cal-list .time { font-size: 13px; color: var(--muted); white-space: nowrap; min-width: 92px; }
+.bar.rot { background: #e5534b; }
+.bar.blau { background: #4f8ff7; }
+.bar.lila { background: #a371f7; }
+.bar.gruen { background: #3fb950; }
+
 /* Essen */
 .dish { border: 1px solid var(--border); border-radius: 10px; padding: 10px 12px; margin-top: 10px; }
 .dish.on { border-color: var(--accent); background: var(--accent-dim); }

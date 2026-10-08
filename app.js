@@ -10,7 +10,7 @@
 const LOCAL = ['localhost', '127.0.0.1'].includes(location.hostname);
 const API = LOCAL ? '/api' : 'https://api.github.com';
 
-const FILES = { gewicht: 'gewicht.md', masse: 'masse.md', log: 'trainingslog.md', plan: 'trainingsplan.json' };
+const FILES = { gewicht: 'gewicht.md', masse: 'masse.md', log: 'trainingslog.md', plan: 'trainingsplan.json', kalender: 'kalender.json' };
 const HEAD = { eintraege: '## Einträge', wochen: '## Wochendurchschnitte', einheiten: '## Einheiten', saetze: '## Sätze' };
 const COLS = {
   gewicht: ['Datum', 'Gewicht (kg)', 'Notiz'],
@@ -273,8 +273,8 @@ async function listDir(path) {
 }
 
 async function loadAll() {
-  const [g, m, l, p, dir] = await Promise.all([
-    getFile(FILES.gewicht), getFile(FILES.masse), getFile(FILES.log), getFile(FILES.plan), listDir('essen'),
+  const [g, m, l, p, k, dir] = await Promise.all([
+    getFile(FILES.gewicht), getFile(FILES.masse), getFile(FILES.log), getFile(FILES.plan), getFile(FILES.kalender), listDir('essen'),
   ]);
   if (!p.text) throw new ApiError('data', '„trainingsplan.json“ fehlt im Daten-Repository.');
   let plan;
@@ -283,7 +283,9 @@ async function loadAll() {
   const weeks = dir.filter((n) => WEEK_FILE_RE.test(n)).sort();
   const keep = S.essen && weeks.includes(S.essen.name) ? S.essen.name : defaultWeek(weeks);
   const essen = { weeks, ...(await loadWeek(keep)) };
-  S = { plan, weights: parseWeights(g.text), masse: parseMasse(m.text), sessions: log.sessions, sets: log.sets, essen };
+  let kalender = null;
+  if (k.text) { try { kalender = JSON.parse(k.text); } catch (e) { /* defekt: Kachel zeigt Hinweis */ } }
+  S = { plan, weights: parseWeights(g.text), masse: parseMasse(m.text), sessions: log.sessions, sets: log.sets, essen, kalender };
 }
 
 /* ---------- Essen: Wochenrezepte und Einkaufsliste ---------- */
@@ -561,6 +563,39 @@ function weightAdd() {
   </div>`;
 }
 
+// Kalender-Kachel: zeigt den heutigen Tag aus kalender.json (Stand der letzten Wochenplanung)
+function calTile() {
+  const open = !!ui.calOpen;
+  const head = `<div class="cal-head" data-action="cal-toggle" role="button" aria-expanded="${open}">
+      <span class="cal-title">Kalender</span><span class="chev ${open ? 'open' : ''}" aria-hidden="true">›</span>
+    </div>`;
+  if (!open) return `<section class="card cal">${head}</section>`;
+
+  const K = S.kalender;
+  const t = today();
+  const now = new Date();
+  const nowHM = `${pad2(now.getHours())}:${pad2(now.getMinutes())}`;
+  let body;
+  if (!K || !K.tage || t < K.von || t > K.bis) {
+    body = '<p class="muted small" style="margin:8px 0 0">Für heute liegen keine Kalenderdaten vor. Schreib Claude „Wochenplanung“, dann werden sie aktualisiert.</p>';
+  } else {
+    const items = (K.tage[t] || []).slice().sort((a, b) => (a.ganztags ? -1 : b.ganztags ? 1 : a.start < b.start ? -1 : 1));
+    body = items.length ? `<ul class="cal-list">${items.map((e) => `
+        <li class="${!e.ganztags && e.ende <= nowHM ? 'past' : ''}">
+          <span class="bar ${esc(e.farbe || 'gruen')}"></span>
+          <span class="time">${e.ganztags ? 'ganztägig' : `${esc(e.start)}–${esc(e.ende)}`}</span>
+          <span class="grow">${esc(e.titel)}</span>
+        </li>`).join('')}</ul>`
+      : '<p class="muted small" style="margin:8px 0 0">Heute keine Einträge.</p>';
+  }
+  const stand = K && K.stand ? `${shortDate(K.stand.slice(0, 10))}, ${K.stand.slice(11, 16)} Uhr` : '–';
+  return `<section class="card cal">${head}
+    <p class="label" style="margin-top:6px">Heute, ${WEEKDAY_SHORT[parseDate(t).getDay()]} ${shortDate(t)}</p>
+    ${body}
+    <p class="label small" style="margin-top:8px">Stand: ${stand} · wird bei jeder Wochenplanung aktualisiert</p>
+  </section>`;
+}
+
 function viewStart() {
   const ws = S.weights;
   const nu = nextUnit();
@@ -570,6 +605,7 @@ function viewStart() {
     : '<p class="label">Gewicht</p><p class="muted">Noch keine Werte. Trag dein erstes Gewicht ein.</p>';
 
   return `
+    ${calTile()}
     <section class="card" id="wcard">${weightCard}${weightAdd()}</section>
     <section class="card">
       <div class="row between">
@@ -1070,6 +1106,7 @@ document.addEventListener('click', (ev) => {
   }
   switch (el.dataset.action) {
     case 'save-weight': saveWeight(el); break;
+    case 'cal-toggle': ui.calOpen = !ui.calOpen; render({ keep: true }); break;
     case 'wadd': ui.wAdd = true; render({ keep: true }); $('#w-kg').focus(); break;
     case 'wadd-cancel': ui.wAdd = false; render({ keep: true }); break;
     case 'pick': {
