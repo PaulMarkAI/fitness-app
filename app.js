@@ -606,6 +606,7 @@ function viewStart() {
 
   return `
     ${calTile()}
+    ${shopTile()}
     <section class="card" id="wcard">${weightCard}${weightAdd()}</section>
     <section class="card">
       <div class="row between">
@@ -754,11 +755,10 @@ function viewEssen() {
   const E = S.essen;
   if (!E || !E.data) {
     return `<section class="card"><h2>Noch keine Rezepte</h2>
-      <p class="muted">Schreib Claude im Chat „Rezepte für nächste Woche“. Sobald sie fertig sind, erscheinen sie hier.</p></section>`;
+      <p class="muted">Schreib Claude im Chat „Wochenplanung“. Sobald die Rezepte fertig sind, erscheinen sie hier.</p></section>`;
   }
   const d = E.data;
   const i = E.weeks.indexOf(E.name);
-  const sl = shoppingList(E);
   const wk = isoWeek(d.von);
 
   const blocks = d.bloecke.map((b) => {
@@ -791,17 +791,6 @@ function viewEssen() {
       </div>`).join('')}
     </section>` : '';
 
-  const list = [...sl.groups.entries()].filter(([, items]) => items.length).map(([abt, items]) => `
-    <h3 class="abt">${esc(abt)}</h3>
-    ${abt === 'Vorrat' ? '<p class="label">Hast du das noch? Sonst mitnehmen.</p>' : ''}
-    <ul class="shop">${items.map((it) => `
-      <li class="${it.struck ? 'struck' : ''}" data-action="strike" data-name="${esc(it.name)}" role="button" aria-pressed="${it.struck}">
-        <span class="check" aria-hidden="true">${it.struck ? '✓' : ''}</span>
-        <span class="grow"><span class="it-name">${esc(it.name)}</span>
-          <span class="label">${mengenText(it.mengen)}${it.packs ? ` → kaufen: ${it.art.packung === 1 ? `${it.packs} ${esc(unitFor(it.art.einheit, it.packs))}` : `${it.packs}× ${fmtAmount(it.art.packung)} ${esc(it.art.einheit)}`}` : ''}</span></span>
-        ${it.preis != null ? `<span class="price">${fmtEuro(it.preis)}</span>` : ''}
-      </li>`).join('')}</ul>`).join('');
-
   return `
     <div class="week-nav">
       <button class="ghost nav" data-action="eprev" ${i > 0 ? '' : 'disabled'} aria-label="Vorherige Woche">‹</button>
@@ -817,12 +806,42 @@ function viewEssen() {
     </section>` : ''}
     ${blocks}
     ${snacks}
-    <section class="card">
-      <div class="row between"><h2 style="margin:0">Einkaufsliste</h2><span class="price big-price">ca. ${fmtEuro(sl.total)}</span></div>
-      <p class="label">Tippe an, was du schon hast. Preise sind Schätzungen für Edeka, ganze Packungen.</p>
-      ${sl.missing.length ? `<p class="hint warn">Noch nicht gewählt: ${sl.missing.map(esc).join(', ')}. Diese Zutaten fehlen noch in der Liste.</p>` : ''}
-      ${list}
-    </section>`;
+    <p class="label" style="text-align:center;margin-top:14px">Die Einkaufsliste findest du in der Übersicht.</p>`;
+}
+
+// Einkaufsliste als aufklappbare Kachel in der Übersicht (Woche wie im Bereich „Essen“)
+function shopTile() {
+  const open = !!ui.shopOpen;
+  const E = S.essen;
+  const head = `<div class="cal-head" data-action="shop-toggle" role="button" aria-expanded="${open}">
+      <span class="cal-title">Einkaufsliste</span><span class="chev ${open ? 'open' : ''}" aria-hidden="true">›</span>
+    </div>`;
+  if (!open) return `<section class="card cal">${head}</section>`;
+  if (!E || !E.data) {
+    return `<section class="card cal">${head}
+      <p class="muted small" style="margin:8px 0 0">Noch keine Rezepte. Schreib Claude „Wochenplanung“.</p></section>`;
+  }
+  const sl = shoppingList(E);
+  const wk = isoWeek(E.data.von);
+  const list = [...sl.groups.entries()].filter(([, items]) => items.length).map(([abt, items]) => `
+    <h3 class="abt">${esc(abt)}</h3>
+    ${abt === 'Vorrat' ? '<p class="label">Hast du das noch? Sonst mitnehmen.</p>' : ''}
+    <ul class="shop">${items.map((it) => `
+      <li class="${it.struck ? 'struck' : ''}" data-action="strike" data-name="${esc(it.name)}" role="button" aria-pressed="${it.struck}">
+        <span class="check" aria-hidden="true">${it.struck ? '✓' : ''}</span>
+        <span class="grow"><span class="it-name">${esc(it.name)}</span>
+          <span class="label">${mengenText(it.mengen)}${it.packs ? ` → kaufen: ${it.art.packung === 1 ? `${it.packs} ${esc(unitFor(it.art.einheit, it.packs))}` : `${it.packs}× ${fmtAmount(it.art.packung)} ${esc(it.art.einheit)}`}` : ''}</span></span>
+        ${it.preis != null ? `<span class="price">${fmtEuro(it.preis)}</span>` : ''}
+      </li>`).join('')}</ul>`).join('');
+  return `<section class="card cal">${head}
+    <div class="row between" style="margin-top:6px">
+      <span class="label">KW ${wk.week} · ${shortDate(E.data.von)}–${shortDate(E.data.bis)}</span>
+      <span class="price big-price">ca. ${fmtEuro(sl.total)}</span>
+    </div>
+    <p class="label">Tippe an, was du schon hast. Preise sind Schätzungen für Edeka, ganze Packungen.</p>
+    ${sl.missing.length ? `<p class="hint warn">Noch nicht gewählt: ${sl.missing.map(esc).join(', ')}. Die Gerichte wählst du unter „Essen“.</p>` : ''}
+    ${list}
+  </section>`;
 }
 
 /* Maße */
@@ -1107,6 +1126,7 @@ document.addEventListener('click', (ev) => {
   switch (el.dataset.action) {
     case 'save-weight': saveWeight(el); break;
     case 'cal-toggle': ui.calOpen = !ui.calOpen; render({ keep: true }); break;
+    case 'shop-toggle': ui.shopOpen = !ui.shopOpen; render({ keep: true }); break;
     case 'wadd': ui.wAdd = true; render({ keep: true }); $('#w-kg').focus(); break;
     case 'wadd-cancel': ui.wAdd = false; render({ keep: true }); break;
     case 'pick': {
