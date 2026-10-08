@@ -317,8 +317,9 @@ const ICONS = {
 };
 const TABS = [['start', 'Übersicht'], ['training', 'Training'], ['masse', 'Maße'], ['plan', 'Plan']];
 
-function render() {
+function render(opts = {}) {
   const views = { start: viewStart, training: viewTraining, masse: viewMasse, plan: viewPlan };
+  const scroll = window.scrollY;
   const title = TABS.find((t) => t[0] === ui.tab)[1];
   $('#app').innerHTML = `
     <header class="top">
@@ -334,29 +335,92 @@ function render() {
       ${TABS.map(([k, l]) => `<button data-tab="${k}" class="${ui.tab === k ? 'on' : ''}">${ICONS[k]}${l}</button>`).join('')}
     </div></nav>`;
   if (ui.tab === 'masse') updateNavyPreview();
-  window.scrollTo(0, 0);
+  window.scrollTo(0, opts.keep ? scroll : 0);
 }
 
 /* Übersicht */
+const WEEKDAY_SHORT = ['So', 'Mo', 'Di', 'Mi', 'Do', 'Fr', 'Sa'];
+const WEEK_RANGE = 3; // kg, feste Höhe des Wochendiagramms
+
+function avgOf(list) { return list.length ? list.reduce((s, w) => s + w.kg, 0) / list.length : null; }
+
+function weekBounds() {
+  const ws = S.weights;
+  const cur = monday(today());
+  return { cur, first: ws.length ? monday(ws[0].date) : cur };
+}
+
+function shiftWeek(n) {
+  const { cur, first } = weekBounds();
+  const next = addDays(ui.wWeek || cur, 7 * n);
+  if (next > cur || next < first) return;
+  Object.assign(ui, { wWeek: next, wSel: null, wEdit: null, wDel: null });
+  render({ keep: true });
+}
+
+function weekCard() {
+  const ws = S.weights;
+  const t = today();
+  const { cur, first } = weekBounds();
+  if (!ui.wWeek) ui.wWeek = cur;
+  const mon = ui.wWeek;
+  const sun = addDays(mon, 6);
+  const inWeek = ws.filter((w) => w.date >= mon && w.date <= sun);
+  const avg = avgOf(inWeek);
+  const prevAvg = avgOf(ws.filter((w) => w.date >= addDays(mon, -7) && w.date < mon));
+  const byDay = new Map(inWeek.map((w) => [w.date, w]));
+  // Angezeigter Tag: der angetippte, sonst heute, sonst der letzte gemessene Tag der Woche
+  const fallback = byDay.has(t) ? t : (inWeek.length ? inWeek[inWeek.length - 1].date : null);
+  const shown = ui.wSel && byDay.has(ui.wSel) ? ui.wSel : fallback;
+  const day = shown ? byDay.get(shown) : null;
+  const w = isoWeek(mon);
+
+  let info = '';
+  if (day && ui.wEdit === day.date) {
+    info = `<div class="day-info">
+      <span>${WEEKDAY_SHORT[parseDate(day.date).getDay()]}, ${shortDate(day.date)}</span>
+      <div class="unit-in" style="width:110px"><input id="we-kg" inputmode="decimal" value="${fmt(day.kg, 1)}" aria-label="Neues Gewicht"><em>kg</em></div>
+      <span class="acts"><button class="primary" data-action="wedit-save" data-date="${day.date}">OK</button><button data-action="wedit-cancel">Abbrechen</button></span>
+    </div>`;
+  } else if (day && ui.wDel === day.date) {
+    info = `<div class="day-info">
+      <span>${fmt(day.kg, 1)} kg vom ${shortDate(day.date)} löschen?</span>
+      <span class="acts"><button class="danger" data-action="wdel-yes" data-date="${day.date}">Löschen</button><button data-action="wdel-no">Nein</button></span>
+    </div>`;
+  } else if (day) {
+    info = `<div class="day-info">
+      <span>${day.date === t ? 'Heute' : WEEKDAY_SHORT[parseDate(day.date).getDay()]}, ${shortDate(day.date)}: <b>${fmt(day.kg, 1)} kg</b></span>
+      <span class="acts"><button class="ghost" data-action="wedit" data-date="${day.date}">Ändern</button><button class="ghost" data-action="wdel" data-date="${day.date}">Löschen</button></span>
+    </div>`;
+  }
+
+  return `
+    <div class="week-nav">
+      <button class="ghost nav" data-action="wprev" ${mon > first ? '' : 'disabled'} aria-label="Vorherige Woche">‹</button>
+      <div class="center">
+        <p class="label">Gewicht · ${mon === cur ? 'diese Woche' : 'Wochenschnitt'}</p>
+        <div class="wk">KW ${w.week} · ${shortDate(mon)}–${shortDate(sun)}</div>
+      </div>
+      <button class="ghost nav" data-action="wnext" ${mon < cur ? '' : 'disabled'} aria-label="Nächste Woche">›</button>
+    </div>
+    <div class="center-big">
+      ${avg != null ? `<span class="big">${fmt(avg, 1)} kg</span>` : '<span class="muted">Keine Werte in dieser Woche</span>'}
+      <p class="label">${avg != null && prevAvg != null ? `<span class="${avg - prevAvg > 0 ? 'up' : 'down'}">${signed(avg - prevAvg)} kg zur Vorwoche</span> · ` : ''}${inWeek.length} ${inWeek.length === 1 ? 'Tag' : 'Tage'} gemessen</p>
+    </div>
+    ${weekChart(mon, byDay, avg, shown, t)}
+    ${info}`;
+}
+
 function viewStart() {
   const ws = S.weights;
-  const weeks = weekStats(ws);
-  const cur = weeks[weeks.length - 1];
-  const prev = weeks[weeks.length - 2];
   const t = today();
   const todayEntry = ws.find((w) => w.date === t);
   const m = S.masse[S.masse.length - 1];
   const nu = nextUnit();
   const lastSession = S.sessions[S.sessions.length - 1];
 
-  const weightCard = cur ? `
-    <p class="label">Gewicht · Wochenschnitt ${esc(weekLabel(cur.monday))}</p>
-    <div class="row" style="align-items:baseline;gap:10px">
-      <span class="big">${fmt(cur.avg, 1)} kg</span>
-      ${prev ? `<span class="small ${cur.avg - prev.avg > 0 ? 'up' : 'down'}">${signed(cur.avg - prev.avg)} kg zur Vorwoche</span>` : ''}
-    </div>
-    <p class="label">${cur.n} ${cur.n === 1 ? 'Tag' : 'Tage'} gemessen</p>
-    ${weightChart(ws)}` : '<p class="label">Gewicht</p><p class="muted">Noch keine Werte. Trag unten dein erstes Gewicht ein.</p>';
+  const weightCard = ws.length ? weekCard()
+    : '<p class="label">Gewicht</p><p class="muted">Noch keine Werte. Trag unten dein erstes Gewicht ein.</p>';
 
   const kfaCard = m && m.kfa != null ? `
     <p class="label">Körperfett · Navy-Methode · ${longDate(m.date)}</p>
@@ -367,7 +431,7 @@ function viewStart() {
     <button class="full" data-tab="masse">Maße eintragen</button>`;
 
   return `
-    <section class="card">${weightCard}</section>
+    <section class="card" id="wcard">${weightCard}</section>
     <section class="card">
       <h2>Gewicht eintragen</h2>
       ${todayEntry ? `<p class="label">Heute schon eingetragen: ${fmt(todayEntry.kg, 1)} kg. Neuer Wert überschreibt ihn.</p>` : '<p class="label">Morgens, nach der Toilette, vor dem Essen.</p>'}
@@ -387,44 +451,51 @@ function viewStart() {
         </div>
         <button class="primary" data-action="go-training" data-unit="${esc(nu)}">Starten</button>
       </div>
-    </section>
-    ${ws.length ? `<section class="card"><h2>Letzte Werte</h2><ul class="list">
-      ${ws.slice(-7).reverse().map((w) => `<li><span>${longDate(w.date)}</span><span>${fmt(w.kg, 1)} kg</span></li>`).join('')}
-    </ul></section>` : ''}`;
+    </section>`;
 }
 
-function weightChart(all) {
-  const pts = all.slice(-56);
-  if (pts.length < 2) return '';
-  const W = 320, H = 150, pl = 36, pr = 8, pt = 10, pb = 22;
-  const t0 = parseDate(pts[0].date).getTime();
-  const t1 = parseDate(pts[pts.length - 1].date).getTime();
-  const span = Math.max(t1 - t0, 6 * 86400000);
-  let lo = Math.min(...pts.map((p) => p.kg));
-  let hi = Math.max(...pts.map((p) => p.kg));
-  const padKg = Math.max(0.3, (hi - lo) * 0.15);
-  lo -= padKg; hi += padKg;
-  const x = (t) => pl + ((t - t0) / span) * (W - pl - pr);
-  const y = (k) => pt + ((hi - k) / (hi - lo)) * (H - pt - pb);
-  const dots = pts.map((p) => `<circle cx="${x(parseDate(p.date).getTime()).toFixed(1)}" cy="${y(p.kg).toFixed(1)}" r="3" fill="#5b6675"/>`).join('');
-  const weeks = weekStats(pts).map((w) => {
-    const t = Math.min(Math.max(parseDate(addDays(w.monday, 3)).getTime(), t0), t0 + span);
-    return `${x(t).toFixed(1)},${y(w.avg).toFixed(1)}`;
-  });
-  const line = weeks.length > 1
-    ? `<polyline points="${weeks.join(' ')}" fill="none" stroke="#2dd4a7" stroke-width="2.5" stroke-linejoin="round" stroke-linecap="round"/>`
-    : `<circle cx="${weeks[0].split(',')[0]}" cy="${weeks[0].split(',')[1]}" r="4.5" fill="#2dd4a7"/>`;
+// Wochendiagramm: 7 feste Spalten Mo–So, feste Höhe von WEEK_RANGE kg um den Wochenschnitt.
+// Nur der angezeigte Tag bekommt eine Zahl; die anderen Punkte zeigen ihren Wert beim Antippen.
+function weekChart(mon, byDay, avg, shown, t) {
+  const W = 320, H = 170, pl = 34, pr = 8, pt = 26, pb = 24;
+  const ws = S.weights;
+  const ref = avg ?? (ws.length ? ws[ws.length - 1].kg : 75);
+  const center = Math.round(ref * 2) / 2;
+  const lo = center - WEEK_RANGE / 2;
+  const hi = center + WEEK_RANGE / 2;
+  const colW = (W - pl - pr) / 7;
+  const x = (i) => pl + (i + 0.5) * colW;
+  const y = (k) => pt + ((hi - Math.min(Math.max(k, lo), hi)) / (hi - lo)) * (H - pt - pb);
+  const days = Array.from({ length: 7 }, (_, i) => addDays(mon, i));
+  const pts = days.map((d, i) => (byDay.has(d) ? { i, d, kg: byDay.get(d).kg } : null)).filter(Boolean);
+
+  const grid = [hi, center, lo].map((k) => `
+    <line x1="${pl}" y1="${y(k).toFixed(1)}" x2="${W - pr}" y2="${y(k).toFixed(1)}" stroke="#232a33"/>
+    <text x="${pl - 6}" y="${(y(k) + 3.5).toFixed(1)}" text-anchor="end">${fmt(k, 1)}</text>`).join('');
+  const avgLine = avg != null
+    ? `<line x1="${pl}" y1="${y(avg).toFixed(1)}" x2="${W - pr}" y2="${y(avg).toFixed(1)}" stroke="#2dd4a7" stroke-width="1.5" stroke-dasharray="5 4" opacity="0.8"/>`
+    : '';
+  const line = pts.length > 1
+    ? `<polyline points="${pts.map((p) => `${x(p.i).toFixed(1)},${y(p.kg).toFixed(1)}`).join(' ')}" fill="none" stroke="#4a5564" stroke-width="1.5" stroke-linejoin="round"/>`
+    : '';
+  const dots = pts.map((p) => {
+    const cx = x(p.i).toFixed(1), cy = y(p.kg).toFixed(1);
+    if (p.d !== shown) return `<circle cx="${cx}" cy="${cy}" r="4.5" fill="#8a94a1"/>`;
+    const ly = Math.max(y(p.kg) - 12, 12).toFixed(1);
+    return `<circle cx="${cx}" cy="${cy}" r="6.5" fill="#2dd4a7" stroke="#0e1115" stroke-width="2"/>
+      <text class="val" x="${cx}" y="${ly}" text-anchor="middle">${fmt(p.kg, 1)}</text>`;
+  }).join('');
+  const labels = days.map((d, i) =>
+    `<text class="${d === t ? 'today' : ''}" x="${x(i).toFixed(1)}" y="${H - 6}" text-anchor="middle">${WEEKDAY_SHORT[parseDate(d).getDay()]}</text>`).join('');
+  // unsichtbare Tippflächen über die ganze Spaltenhöhe, damit man den Punkt nicht genau treffen muss
+  const hits = pts.map((p) =>
+    `<rect class="hit" data-action="wsel" data-date="${p.d}" x="${(pl + p.i * colW).toFixed(1)}" y="0" width="${colW.toFixed(1)}" height="${H}" fill="transparent"/>`).join('');
+
   return `
-    <svg class="chart" viewBox="0 0 ${W} ${H}" role="img" aria-label="Gewichtsverlauf">
-      <line x1="${pl}" y1="${pt}" x2="${W - pr}" y2="${pt}" stroke="#2a313b"/>
-      <line x1="${pl}" y1="${H - pb}" x2="${W - pr}" y2="${H - pb}" stroke="#2a313b"/>
-      <text x="${pl - 6}" y="${pt + 4}" text-anchor="end">${fmt(hi, 1)}</text>
-      <text x="${pl - 6}" y="${H - pb + 4}" text-anchor="end">${fmt(lo, 1)}</text>
-      <text x="${pl}" y="${H - 6}">${shortDate(pts[0].date)}</text>
-      <text x="${W - pr}" y="${H - 6}" text-anchor="end">${shortDate(pts[pts.length - 1].date)}</text>
-      ${dots}${line}
+    <svg class="chart" viewBox="0 0 ${W} ${H}" role="img" aria-label="Gewicht dieser Woche">
+      ${grid}${avgLine}${line}${dots}${labels}${hits}
     </svg>
-    <div class="legend"><span><i style="background:#5b6675"></i>Tageswert</span><span><i style="background:#2dd4a7"></i>Wochenschnitt</span></div>`;
+    <div class="legend"><span><i style="background:#8a94a1"></i>Tageswert (antippen)</span><span><i style="background:#2dd4a7"></i>Wochenschnitt (gestrichelt)</span></div>`;
 }
 
 /* Training */
@@ -609,9 +680,7 @@ function weightFile(text, weights) {
   return t;
 }
 
-async function saveWeight(btn) {
-  const date = $('#w-date').value;
-  const kg = num($('#w-kg').value);
+async function storeWeight(btn, date, kg) {
   if (!validDate(date)) return toast('Bitte ein gültiges Datum wählen (nicht in der Zukunft).', true);
   if (kg == null || kg < 30 || kg > 250) return toast('Bitte ein Gewicht in kg eingeben, z. B. 74,5.', true);
   await busy(btn, async () => {
@@ -622,8 +691,23 @@ async function saveWeight(btn) {
       return weightFile(t, ws);
     }, `Gewicht ${date}: ${fmt(kg, 1)} kg`);
     S.weights = parseWeights(text);
+    Object.assign(ui, { wWeek: monday(date), wSel: null, wEdit: null, wDel: null });
     toast(`${fmt(kg, 1)} kg gespeichert`);
-    render();
+    render({ keep: true });
+  });
+}
+
+function saveWeight(btn) { return storeWeight(btn, $('#w-date').value, num($('#w-kg').value)); }
+
+async function deleteWeight(btn, date) {
+  await busy(btn, async () => {
+    const text = await updateFile(FILES.gewicht,
+      (t) => weightFile(t, parseWeights(t).filter((w) => w.date !== date)),
+      `Gewicht ${date} gelöscht`);
+    S.weights = parseWeights(text);
+    Object.assign(ui, { wSel: null, wEdit: null, wDel: null });
+    toast('Wert gelöscht');
+    render({ keep: true });
   });
 }
 
@@ -762,6 +846,18 @@ document.addEventListener('click', (ev) => {
   }
   switch (el.dataset.action) {
     case 'save-weight': saveWeight(el); break;
+    case 'wprev': shiftWeek(-1); break;
+    case 'wnext': shiftWeek(1); break;
+    case 'wsel':
+      // erneutes Antippen des gewählten Tags springt zurück zum Standard (heute bzw. letzter Tag)
+      Object.assign(ui, { wSel: ui.wSel === el.dataset.date ? null : el.dataset.date, wEdit: null, wDel: null });
+      render({ keep: true });
+      break;
+    case 'wedit': Object.assign(ui, { wSel: el.dataset.date, wEdit: el.dataset.date, wDel: null }); render({ keep: true }); $('#we-kg').focus(); break;
+    case 'wedit-cancel': case 'wdel-no': Object.assign(ui, { wEdit: null, wDel: null }); render({ keep: true }); break;
+    case 'wedit-save': storeWeight(el, el.dataset.date, num($('#we-kg').value)); break;
+    case 'wdel': Object.assign(ui, { wSel: el.dataset.date, wDel: el.dataset.date, wEdit: null }); render({ keep: true }); break;
+    case 'wdel-yes': deleteWeight(el, el.dataset.date); break;
     case 'save-masse': saveMasse(el); break;
     case 'save-training': saveTraining(el); break;
     case 'go-training': ui.unit = el.dataset.unit; ui.tDate = null; ui.tab = 'training'; render(); break;
@@ -784,8 +880,22 @@ document.addEventListener('change', (ev) => {
 
 document.addEventListener('keydown', (ev) => {
   if (ev.key === 'Enter' && ev.target.id === 'w-kg') saveWeight($('[data-action="save-weight"]'));
+  if (ev.key === 'Enter' && ev.target.id === 'we-kg') $('[data-action="wedit-save"]').click();
   if (ev.key === 'Enter' && ev.target.id === 'l-token') login($('[data-action="login"]'));
 });
+
+// Wischen auf der Gewichtskarte: nach rechts = Vorwoche, nach links = nächste Woche
+let touchStart = null;
+document.addEventListener('touchstart', (ev) => {
+  touchStart = ev.target.closest('#wcard') && !ev.target.closest('input') ? { x: ev.touches[0].clientX, y: ev.touches[0].clientY } : null;
+}, { passive: true });
+document.addEventListener('touchend', (ev) => {
+  if (!touchStart) return;
+  const dx = ev.changedTouches[0].clientX - touchStart.x;
+  const dy = ev.changedTouches[0].clientY - touchStart.y;
+  touchStart = null;
+  if (Math.abs(dx) > 60 && Math.abs(dy) < 40) shiftWeek(dx > 0 ? -1 : 1);
+}, { passive: true });
 
 if ('serviceWorker' in navigator && !LOCAL) {
   navigator.serviceWorker.register('sw.js').catch(() => { /* App funktioniert auch ohne */ });

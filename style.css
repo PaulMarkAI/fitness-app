@@ -116,7 +116,22 @@ details p { margin: 6px 0 0; font-size: 14px; }
 /* Diagramm */
 svg.chart { width: 100%; height: auto; display: block; margin-top: 8px; }
 svg.chart text { fill: var(--muted); font-size: 10px; }
-.legend { display: flex; gap: 14px; font-size: 12px; color: var(--muted); margin-top: 4px; }
+.legend { display: flex; gap: 14px; font-size: 12px; color: var(--muted); margin-top: 4px; flex-wrap: wrap; }
+svg.chart text.val { fill: var(--accent-text); font-size: 13px; font-weight: 700; paint-order: stroke; stroke: var(--surface); stroke-width: 4px; }
+svg.chart text.today { fill: var(--accent-text); font-weight: 700; }
+svg.chart rect.hit { cursor: pointer; }
+
+/* Wochenansicht Gewicht */
+.week-nav { display: flex; align-items: center; justify-content: space-between; gap: 8px; }
+.week-nav .center { text-align: center; flex: 1; }
+.week-nav .wk { font-size: 14px; font-weight: 600; }
+button.nav { font-size: 28px; line-height: 1; min-width: 44px; color: var(--text); }
+button.nav:disabled { opacity: 0.2; cursor: default; }
+.center-big { text-align: center; margin-top: 4px; }
+.day-info { display: flex; justify-content: space-between; align-items: center; gap: 8px; margin-top: 8px; padding: 8px 10px; border-radius: 10px; background: var(--surface-2); font-size: 14px; flex-wrap: wrap; }
+.day-info .acts { display: flex; gap: 4px; }
+.day-info button { min-height: 36px; padding: 6px 10px; font-size: 13px; }
+button.danger { color: var(--danger); border-color: var(--danger); background: transparent; }
 .legend i { display: inline-block; width: 10px; height: 10px; border-radius: 50%; margin-right: 5px; vertical-align: -1px; }
 
 /* Untere Navigation */

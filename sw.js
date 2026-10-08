@@ -1,6 +1,6 @@
 // Service Worker: macht die App installierbar und lädt die App-Dateien auch bei schlechtem Netz.
 // Zuerst wird immer das Netz gefragt, damit Updates sofort ankommen. Daten von GitHub werden nie zwischengespeichert.
-const CACHE = 'fitness-v1';
+const CACHE = 'fitness-v2';
 const SHELL = ['./', './index.html', './style.css', './app.js', './manifest.webmanifest',
   './icons/icon-192.png', './icons/icon-512.png', './icons/apple-touch-icon.png'];
 
