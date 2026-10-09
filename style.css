@@ -150,6 +150,9 @@ ul.cal-list .time { font-size: 13px; color: var(--muted); white-space: nowrap; m
 .bar.lila { background: #a371f7; }
 .bar.gruen { background: #3fb950; }
 
+.card.warmup { border-color: var(--accent-dim); }
+.card.warmup h2 { color: var(--accent-text); }
+
 /* Fotos */
 .umf-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 0 10px; }
 .pair { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; margin-top: 10px; }

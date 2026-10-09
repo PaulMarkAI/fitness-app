@@ -850,6 +850,10 @@ function viewTraining() {
       <label class="field"><span>Datum</span><input id="t-date" type="date" value="${date}" max="${today()}"></label>
       ${done ? '<p class="label" style="margin-top:6px">Für dieses Datum ist die Einheit schon gespeichert. Speichern überschreibt sie.</p>' : ''}
     </section>
+    ${(S.plan.aufwaermen || []).length ? `<section class="card warmup">
+      <h2>Aufwärmen · ca. 8 Min.</h2>
+      <ol class="steps">${S.plan.aufwaermen.map((s) => `<li>${esc(s)}</li>`).join('')}</ol>
+    </section>` : ''}
     ${cards}
     <section class="card">
       <h2>Abschluss</h2>
